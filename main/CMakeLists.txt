@@ -1,0 +1,36 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "epd_panel.c"
+        "test_patterns.c"
+        "app/refresh_policy.c"
+        "display/rotation.c"
+        "ble/ble_protocol.c"
+        "ble/ble_commands.c"
+        "storage/nvs_store.c"
+        "storage/photo_store.c"
+        "app/app_state.c"
+        "app/refresh_queue.c"
+        "net/wifi_manager.c"
+        "net/wifi_provisioning.c"
+        "net/ntp_manager.c"
+        "net/weather_client.c"
+        "ble/ble_gatt.c"
+        "ble/ble_service.cpp"
+        "ble/ble_upload.c"
+        "display/manual_canvas.c"
+        "display/font_bitmap.c"
+        "ui/ui_app.c"
+        "ui/ui_calendar.c"
+        "ui/ui_photo.c"
+    INCLUDE_DIRS "."
+        "app"
+        "display"
+        "ble"
+        "storage"
+        "net"
+        "ui"
+    REQUIRES nvs_flash esp_wifi esp_event esp_netif esp_http_client esp-tls bt
+        esp_driver_uart esp_driver_gpio esp_driver_spi spi_flash
+        esp_driver_usb_serial_jtag h2zero__esp-nimble-cpp
+)
