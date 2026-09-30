@@ -162,8 +162,14 @@ esp_err_t test_pattern_checker(int cell)
 static esp_err_t ref_image_strip_render(void *ctx, int y0)
 {
     (void)ctx;
-    epd_strip_copy(ref_image + (size_t)y0 * EPD_BYTES_PER_LINE,
-                   EPD_BYTES_PER_LINE, EPD_STRIP_ROWS);
+    int rows = EPD_STRIP_ROWS;
+    if (y0 + rows > EPD_HEIGHT) {
+        rows = EPD_HEIGHT - y0;   /* 最后一条带可能不足 16 行 */
+    }
+    if (rows > 0) {
+        epd_strip_copy(ref_image + (size_t)y0 * EPD_BYTES_PER_LINE,
+                       EPD_BYTES_PER_LINE, rows);
+    }
     return ESP_OK;
 }
 
