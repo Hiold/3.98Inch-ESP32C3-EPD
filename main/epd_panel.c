@@ -212,33 +212,6 @@ void epd_set_psr_normal(bool normal)
 /* JD79665 requires the controller-sized 800x600 frame on every DTM write. */
 static bool s_physical_frame = true;
 
-/*
- * The datasheet's DTM bit table lists the four pixels of a byte as
- * "Pixel1 Pixel2 Pixel3 Pixel4" in bits 7:6, 5:4, 3:2, 1:0, which is the
- * packing used everywhere in the reference driver and here. Some four-colour
- * panels instead pack the pixels in the opposite order inside the byte, which
- * changes nothing about the byte count but everything about the picture.
- */
-static bool s_reverse_bits = false;
-
-void epd_set_bit_order(bool reversed)
-{
-    s_reverse_bits = reversed;
-    ESP_LOGW(TAG, "byte bit order: %s", reversed ? "reversed" : "normal");
-}
-
-bool epd_bit_order_reversed(void) { return s_reverse_bits; }
-
-/* Map a source byte to the transmitted byte. */
-static inline uint8_t wire_byte(uint8_t b)
-{
-    if (!s_reverse_bits) {
-        return b;
-    }
-    return (uint8_t)(((b & 0x03u) << 6) | ((b & 0x0Cu) << 2) |
-                     ((b & 0x30u) >> 2) | ((b & 0xC0u) >> 6));
-}
-
 void epd_set_physical_frame(bool enabled)
 {
     s_physical_frame = enabled;
@@ -429,25 +402,6 @@ static esp_err_t write_data_block(const uint8_t *data, size_t len)
         return write_data_block_continuous(data, len);
     }
 
-    if (s_reverse_bits) {
-        /* Transform through a scratch buffer: the source may be the caller's
-         * framebuffer, which must not be modified. */
-        static uint8_t scratch[2048];
-        while (len > 0) {
-            size_t n = len > sizeof(scratch) ? sizeof(scratch) : len;
-            for (size_t i = 0; i < n; i++) {
-                scratch[i] = wire_byte(data[i]);
-            }
-            esp_err_t err = spi_tx(scratch, n);
-            if (err != ESP_OK) {
-                return err;
-            }
-            data += n;
-            len -= n;
-        }
-        return ESP_OK;
-    }
-
     switch (s_xfer) {
     case EPD_XFER_BYTE:
         for (size_t i = 0; i < len; i++) {
@@ -495,19 +449,9 @@ static esp_err_t write_data_block_continuous(const uint8_t *data, size_t len)
         return err;
     }
 
-    static uint8_t scratch[2048];
     while (len > 0) {
         size_t n = len > EPD_DATA_CHUNK ? EPD_DATA_CHUNK : len;
         const uint8_t *tx = data;
-        if (s_reverse_bits) {
-            if (n > sizeof(scratch)) {
-                n = sizeof(scratch);
-            }
-            for (size_t i = 0; i < n; i++) {
-                scratch[i] = wire_byte(data[i]);
-            }
-            tx = scratch;
-        }
         spi_transaction_t t = {
             .length = n * 8,
             .tx_buffer = tx,

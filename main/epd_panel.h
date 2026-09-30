@@ -105,10 +105,6 @@ bool epd_data_stop_enabled(void);
 void epd_set_psr_normal(bool normal);
 bool epd_psr_normal(void);
 
-/* Pack the four pixels of a byte in the opposite order. */
-void epd_set_bit_order(bool reversed);
-bool epd_bit_order_reversed(void);
-
 /* Row-major (reference drivers) versus column-major (per-panel sketch). */
 void epd_set_column_major(bool enabled);
 bool epd_column_major(void);

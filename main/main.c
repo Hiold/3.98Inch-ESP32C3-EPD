@@ -378,7 +378,6 @@ void app_main(void)
      * panel self-test automatically at boot. */
     epd_set_frame_mode(EPD_FRAME_SWEEP);
     epd_set_rowmap(EPD_MAP_LINEAR);
-    epd_set_bit_order(false);
     epd_set_column_major(false);
     epd_set_init_variant(false);
     epd_set_x_offset(0);

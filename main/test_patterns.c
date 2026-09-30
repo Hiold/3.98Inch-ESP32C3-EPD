@@ -619,7 +619,7 @@ bool test_console_command(const char *cmd, size_t len)
             epd_init();
             return true;
         case 'b':
-            epd_set_bit_order(!epd_bit_order_reversed());
+            ESP_LOGI(TAG, "bit-order reversal diagnostic removed in strip mode");
             return true;
         case 'n':
             /* Switch init table and re-program the registers. */
