@@ -5,6 +5,7 @@
 #include <time.h>
 
 #include "display_driver.h"
+#include "epd_panel.h"
 #include "manual_canvas.h"
 #include "photo_store.h"
 
@@ -459,30 +460,45 @@ ui_mode_t ui_app_mode(void)
     return current.mode;
 }
 
+typedef struct {
+    manual_canvas_t canvas;
+    struct tm local;
+} ui_render_ctx_t;
+
+static esp_err_t ui_draw_strip(void *ctx, int y0)
+{
+    (void)y0;
+    ui_render_ctx_t *uc = (ui_render_ctx_t *)ctx;
+    const manual_canvas_t *canvas = &uc->canvas;
+
+    if (current.mode == UI_MODE_STATUS) {
+        draw_status_page(canvas);
+    } else if (current.mode == UI_MODE_PHOTO) {
+        draw_photo_page(canvas);
+    } else if (canvas->width >= 600) {
+        draw_calendar_landscape(canvas, &uc->local,
+                                current.mode == UI_MODE_CALENDAR_PHOTO);
+    } else {
+        draw_calendar_portrait(canvas, &uc->local,
+                               current.mode == UI_MODE_CALENDAR_PHOTO);
+    }
+    return ESP_OK;
+}
+
 int ui_app_render(void)
 {
-    manual_canvas_t canvas;
+    ui_render_ctx_t uc;
     const display_rotation_t rotation =
         (display_rotation_t)((current.rotation & 0x03u) * 90u);
-    if (!manual_canvas_init(&canvas, rotation)) return -1;
+    if (!manual_canvas_init(&uc.canvas, rotation)) return -1;
 
-    manual_canvas_clear(&canvas, MANUAL_COLOR_WHITE);
     time_t timestamp = time(NULL);
     struct tm local = {0};
     const bool time_valid = timestamp >= 1000000000 &&
                             localtime_r(&timestamp, &local) != NULL;
     if (!time_valid) use_build_date(&local);
+    uc.local = local;
 
-    if (current.mode == UI_MODE_STATUS) {
-        draw_status_page(&canvas);
-    } else if (current.mode == UI_MODE_PHOTO) {
-        draw_photo_page(&canvas);
-    } else if (canvas.width >= 600) {
-        draw_calendar_landscape(&canvas, &local,
-                                current.mode == UI_MODE_CALENDAR_PHOTO);
-    } else {
-        draw_calendar_portrait(&canvas, &local,
-                               current.mode == UI_MODE_CALENDAR_PHOTO);
-    }
-    return 0;
+    /* 去掉独立 manual_canvas_clear：epd_strip_begin 每个条带清一次。 */
+    return epd_display(ui_draw_strip, &uc) == ESP_OK ? 0 : -1;
 }

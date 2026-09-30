@@ -29,9 +29,7 @@ int manual_canvas_init(manual_canvas_t *canvas, display_rotation_t rotation)
     display_rotation_dimensions(rotation, DISPLAY_EPD_WIDTH, DISPLAY_EPD_HEIGHT,
                                 &canvas->width, &canvas->height);
 #ifdef ESP_PLATFORM
-    if (!epd_fb_raw()) {
-        return 0;
-    }
+    /* 条带缓冲为静态数组，恒可用；无需检查 epd_fb_raw。 */
 #endif
     canvas->rotation = rotation;
     return canvas->width > 0 && canvas->height > 0;
