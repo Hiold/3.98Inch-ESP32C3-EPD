@@ -151,13 +151,20 @@ esp_err_t epd_init(void);
 
 /* Allocate the framebuffer. Required before any fb_* call. */
 esp_err_t epd_fb_alloc(void);
-uint8_t *epd_fb_raw(void);
-/* The framebuffer may be physically split into small chunks when BLE is
- * active.  Use these helpers instead of assuming epd_fb_raw() is contiguous. */
-esp_err_t epd_fb_copy_from(const uint8_t *src, size_t length);
-uint8_t epd_fb_read_byte(size_t offset);
 
-/* ------------------------------------------------------------------ draw --- */
+/* --------------------------------------------------------------- strip ---- */
+/* The framebuffer is a single 16-row strip. A render callback fills each
+ * active strip in native coordinates, then the panel streams it. */
+#define EPD_STRIP_ROWS 16u
+
+/* 条带生命周期：渲染器对每个 16 行条带调用 begin -> 绘制 -> flush。 */
+typedef esp_err_t (*epd_strip_render_fn)(void *ctx, int y0);
+void epd_strip_begin(int y0);
+bool epd_strip_active(void);
+void epd_strip_copy(const uint8_t *src, size_t src_stride, int rows);
+esp_err_t epd_write_strips(epd_strip_render_fn render, void *ctx);
+
+/* ---------------------------------------------------------------- draw --- */
 void epd_fb_fill(uint8_t color);
 void epd_fb_set_pixel(int x, int y, uint8_t color);
 void epd_fb_hline(int x0, int x1, int y, uint8_t color);
@@ -168,8 +175,6 @@ void epd_fb_rect_fill_frame(int x, int y, int w, int h, uint8_t color, int thick
 void epd_fb_char(int x, int y, char c, uint8_t color, int scale);
 
 /* ---------------------------------------------------------------- update --- */
-/* Push the whole framebuffer into panel RAM. */
-esp_err_t epd_write_frame(const uint8_t *frame);
 /* Push one display line; used by the line-by-line transfer mode. */
 esp_err_t epd_write_line(int y, const uint8_t *line192);
 
@@ -183,7 +188,7 @@ esp_err_t epd_sleep(void);
 esp_err_t epd_wait_busy(uint32_t timeout_ms);
 
 /* Refresh the panel from the current framebuffer, end to end. */
-esp_err_t epd_display(void);
+esp_err_t epd_display(epd_strip_render_fn render, void *ctx);
 
 const epd_diag_t *epd_diag(void);
 const char *epd_stage_name(epd_stage_t stage);
