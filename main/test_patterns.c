@@ -19,10 +19,6 @@ static const char *TAG = "test";
 
 static void label(int x, int y, const char *s, uint8_t color, int scale)
 {
-    uint8_t *fb = epd_fb_raw();
-    if (!fb) {
-        return;
-    }
     for (; *s; s++) {
         epd_fb_char(x, y, *s, color, scale);
         x += 6 * scale;
@@ -36,12 +32,42 @@ static void draw_swatch(int x, int y, int w, int h, uint8_t color,
     label(x + 10, y + 10, name, ink, 3);
 }
 
+/* Each test page draws through a per-strip callback: the renderer fills the
+ * active strip in native coordinates (clipped), then the panel streams it. */
+typedef void (*page_draw_arg_fn)(void *arg);
+
+typedef struct {
+    page_draw_arg_fn fn;
+    void *arg;
+} page_call_t;
+
+static esp_err_t page_strip_render(void *ctx, int y0)
+{
+    (void)y0;
+    page_call_t *call = (page_call_t *)ctx;
+    call->fn(call->arg);
+    return ESP_OK;
+}
+
+static esp_err_t display_page_arg(page_draw_arg_fn fn, void *arg)
+{
+    static page_call_t call;
+    call.fn = fn;
+    call.arg = arg;
+    return epd_display(page_strip_render, &call);
+}
+
 /* ------------------------------------------------------------------ pages -- */
+
+static void draw_solid(void *arg)
+{
+    epd_fb_fill((uint8_t)(uintptr_t)arg);
+}
 
 esp_err_t test_pattern_solid(uint8_t color)
 {
-    epd_fb_fill(color);
-    return epd_display();
+    /* epd_fb_fill 只清当前条带，逐条带重跑即可填满整帧。 */
+    return display_page_arg(draw_solid, (void *)(uintptr_t)color);
 }
 
 /*
@@ -51,8 +77,9 @@ esp_err_t test_pattern_solid(uint8_t color)
  *   - the "TL" corner marker is red, so a mirrored axis is visible
  *   - the 48 px grid makes stretching or dropped lines obvious
  */
-esp_err_t test_pattern_info(void)
+static void draw_info(void *arg)
 {
+    (void)arg;
     const int wide = EPD_WIDTH / 4; /* 192 */
 
     epd_fb_fill(EPD_COLOR_WHITE);
@@ -98,16 +125,17 @@ esp_err_t test_pattern_info(void)
     }
     epd_fb_rect(0, 0, EPD_WIDTH, EPD_HEIGHT, EPD_COLOR_RED);
     epd_fb_rect(1, 1, EPD_WIDTH - 2, EPD_HEIGHT - 2, EPD_COLOR_RED);
+}
 
-    return epd_display();
+esp_err_t test_pattern_info(void)
+{
+    return display_page_arg(draw_info, NULL);
 }
 
 /* A high-contrast checkerboard: every wrong shift, mirror or line drop shows. */
-esp_err_t test_pattern_checker(int cell)
+static void draw_checker(void *arg)
 {
-    if (cell < 1) {
-        cell = 8;
-    }
+    const int cell = (int)(intptr_t)arg;
     for (int y = 0; y < EPD_HEIGHT; y++) {
         for (int x = 0; x < EPD_WIDTH; x++) {
             int on = ((x / cell) + (y / cell)) & 1;
@@ -115,7 +143,14 @@ esp_err_t test_pattern_checker(int cell)
         }
     }
     label(8, 8, "CHECKER", EPD_COLOR_RED, 2);
-    return epd_display();
+}
+
+esp_err_t test_pattern_checker(int cell)
+{
+    if (cell < 1) {
+        cell = 8;
+    }
+    return display_page_arg(draw_checker, (void *)(intptr_t)cell);
 }
 
 /*
@@ -124,19 +159,24 @@ esp_err_t test_pattern_checker(int cell)
  * this shows the same frozen band, the defect is not in our rendering; if it
  * is clean, the defect is content dependent.
  */
+static esp_err_t ref_image_strip_render(void *ctx, int y0)
+{
+    (void)ctx;
+    epd_strip_copy(ref_image + (size_t)y0 * EPD_BYTES_PER_LINE,
+                   EPD_BYTES_PER_LINE, EPD_STRIP_ROWS);
+    return ESP_OK;
+}
+
 esp_err_t test_pattern_ref_image(void)
 {
-    if (!epd_fb_raw()) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    esp_err_t err = epd_fb_copy_from(ref_image, REF_IMAGE_BYTES);
-    return err == ESP_OK ? epd_display() : err;
+    return epd_display(ref_image_strip_render, NULL);
 }
 
 /* Four horizontal bands: isolates a vertical (line-order) fault from a
  * horizontal (byte-order) one. */
-esp_err_t test_pattern_bands_h(void)
+static void draw_bands_h(void *arg)
 {
+    (void)arg;
     const int band = EPD_HEIGHT / 4;
     static const uint8_t colors[4] = {EPD_COLOR_BLACK, EPD_COLOR_WHITE,
                                       EPD_COLOR_YELLOW, EPD_COLOR_RED};
@@ -148,7 +188,11 @@ esp_err_t test_pattern_bands_h(void)
                           : EPD_COLOR_WHITE;
         label(350, i * band + band / 2 - 10, names[i], ink, 3);
     }
-    return epd_display();
+}
+
+esp_err_t test_pattern_bands_h(void)
+{
+    return display_page_arg(draw_bands_h, NULL);
 }
 
 /*
@@ -163,8 +207,9 @@ esp_err_t test_pattern_bands_h(void)
 #define CAL_MARK 120
 #define CAL_INSET 44
 
-esp_err_t test_pattern_corners(void)
+static void draw_corners(void *arg)
 {
+    (void)arg;
     epd_fb_fill(EPD_COLOR_WHITE);
 
     epd_fb_rect_fill(CAL_INSET, CAL_INSET, CAL_MARK, CAL_MARK,
@@ -181,7 +226,11 @@ esp_err_t test_pattern_corners(void)
     epd_fb_rect(3, 3, EPD_WIDTH - 6, EPD_HEIGHT - 6, EPD_COLOR_BLACK);
 
     /* Nothing else on the page: no other red, yellow or black pixels. */
-    return epd_display();
+}
+
+esp_err_t test_pattern_corners(void)
+{
+    return display_page_arg(draw_corners, NULL);
 }
 
 /* Marker centres, exposed for the analysis script. */
@@ -203,12 +252,9 @@ void test_calibration_markers(int *tl_x, int *tl_y, int *tr_x, int *tr_y,
  * stripe that is neither black, white nor yellow, and the yellow indices pin
  * down its position to within a few pixels.
  */
-esp_err_t test_pattern_stripes_x(void)
+static void draw_stripes_x(void *arg)
 {
-    esp_err_t err = test_pattern_solid(EPD_COLOR_WHITE);
-    if (err != ESP_OK) {
-        return err;
-    }
+    (void)arg;
     epd_fb_fill(EPD_COLOR_WHITE);
     for (int x = 0; x < EPD_WIDTH; x += 48) {
         epd_fb_rect_fill(x, 0, 24, EPD_HEIGHT, EPD_COLOR_BLACK);
@@ -217,7 +263,11 @@ esp_err_t test_pattern_stripes_x(void)
         epd_fb_rect_fill(x, 0, 3, EPD_HEIGHT, EPD_COLOR_YELLOW);
     }
     label(8, 8, "STRIPES X", EPD_COLOR_RED, 3);
-    return epd_display();
+}
+
+esp_err_t test_pattern_stripes_x(void)
+{
+    return display_page_arg(draw_stripes_x, NULL);
 }
 
 /*
@@ -233,12 +283,9 @@ esp_err_t test_pattern_stripes_x(void)
  * Running both localises the fault to one axis without any assumption about
  * how the panel is rotated on the bench.
  */
-esp_err_t test_pattern_axis_probe_h(void)
+static void draw_probe_h(void *arg)
 {
-    esp_err_t err = test_pattern_solid(EPD_COLOR_WHITE);
-    if (err != ESP_OK) {
-        return err;
-    }
+    (void)arg;
     epd_fb_fill(EPD_COLOR_WHITE);
     for (int x = 0; x < EPD_WIDTH; x += 128) {
         epd_fb_rect_fill(x, 0, 64, EPD_HEIGHT, EPD_COLOR_BLACK);
@@ -249,15 +296,16 @@ esp_err_t test_pattern_axis_probe_h(void)
         epd_fb_vline(x + 63, 0, EPD_HEIGHT - 1, EPD_COLOR_YELLOW);
     }
     label(8, EPD_HEIGHT / 2, "PROBE H", EPD_COLOR_RED, 3);
-    return epd_display();
 }
 
-esp_err_t test_pattern_axis_probe_v(void)
+esp_err_t test_pattern_axis_probe_h(void)
 {
-    esp_err_t err = test_pattern_solid(EPD_COLOR_WHITE);
-    if (err != ESP_OK) {
-        return err;
-    }
+    return display_page_arg(draw_probe_h, NULL);
+}
+
+static void draw_probe_v(void *arg)
+{
+    (void)arg;
     epd_fb_fill(EPD_COLOR_WHITE);
     for (int y = 0; y < EPD_HEIGHT; y += 128) {
         epd_fb_rect_fill(0, y, EPD_WIDTH, 64, EPD_COLOR_BLACK);
@@ -267,7 +315,11 @@ esp_err_t test_pattern_axis_probe_v(void)
         epd_fb_hline(0, EPD_WIDTH - 1, y + 63, EPD_COLOR_YELLOW);
     }
     label(8, EPD_HEIGHT / 2, "PROBE V", EPD_COLOR_RED, 3);
-    return epd_display();
+}
+
+esp_err_t test_pattern_axis_probe_v(void)
+{
+    return display_page_arg(draw_probe_v, NULL);
 }
 
 /*
@@ -279,8 +331,9 @@ esp_err_t test_pattern_axis_probe_v(void)
  *     so a partially written line is still identifiable
  *   - a solid red band sits at rows 300..330 as a known landmark
  */
-esp_err_t test_pattern_stripes(void)
+static void draw_stripes(void *arg)
 {
+    (void)arg;
     epd_fb_fill(EPD_COLOR_BLACK);
     for (int y = 0; y < EPD_HEIGHT; y += 24) {
         epd_fb_rect_fill(0, y, EPD_WIDTH, 23, EPD_COLOR_WHITE);
@@ -294,12 +347,17 @@ esp_err_t test_pattern_stripes(void)
     }
     label(6, 130, "STRIPE 24PX", EPD_COLOR_RED, 3);
     epd_fb_rect_fill(0, 300, EPD_WIDTH, 31, EPD_COLOR_RED);
-    return epd_display();
+}
+
+esp_err_t test_pattern_stripes(void)
+{
+    return display_page_arg(draw_stripes, NULL);
 }
 
 /* Same ruler rotated for alignment checks along x. */
-esp_err_t test_pattern_stripes_v(void)
+static void draw_stripes_v(void *arg)
 {
+    (void)arg;
     epd_fb_fill(EPD_COLOR_BLACK);
     for (int x = 0; x < EPD_WIDTH; x += 24) {
         epd_fb_rect_fill(x, 0, 23, EPD_HEIGHT, EPD_COLOR_WHITE);
@@ -308,23 +366,29 @@ esp_err_t test_pattern_stripes_v(void)
         epd_fb_rect_fill(x, 0, 1, EPD_HEIGHT, EPD_COLOR_RED);
     }
     epd_fb_rect_fill(EPD_WIDTH / 2 - 1, 0, 3, EPD_HEIGHT, EPD_COLOR_YELLOW);
-    return epd_display();
+}
+
+esp_err_t test_pattern_stripes_v(void)
+{
+    return display_page_arg(draw_stripes_v, NULL);
 }
 
 /* Alternate-page variant: same colour bars as the info page but with the
  * bottom half replaced, so a stale ROM image cannot be mistaken for output. */
-esp_err_t test_pattern_info_b(void)
+static void draw_info_b(void *arg)
 {
-    esp_err_t err = test_pattern_info();
-    if (err != ESP_OK) {
-        return err;
-    }
+    (void)arg;
+    draw_info(NULL);
     /* Repaint only the lower half with a distinguishable pattern. */
     for (int y = EPD_HEIGHT / 2; y < EPD_HEIGHT; y += 16) {
         epd_fb_rect_fill(0, y, EPD_WIDTH, 8, EPD_COLOR_YELLOW);
     }
     label(8, EPD_HEIGHT / 2 + 20, "PAGE B HALF", EPD_COLOR_BLACK, 3);
-    return epd_display();
+}
+
+esp_err_t test_pattern_info_b(void)
+{
+    return display_page_arg(draw_info_b, NULL);
 }
 
 /*
@@ -358,8 +422,9 @@ esp_err_t test_pattern_info_b(void)
 #define PROBE_ROW_LAST   336
 #define PROBE_BLOCK      48
 
-esp_err_t test_pattern_probe_a(void)
+static void draw_probe_a(void *arg)
 {
+    (void)arg;
     epd_fb_fill(EPD_COLOR_WHITE);
 
     for (int x = 0; x < EPD_WIDTH; x += 2 * PROBE_BLOCK) {
@@ -374,11 +439,16 @@ esp_err_t test_pattern_probe_a(void)
 
     epd_fb_rect(0, 0, EPD_WIDTH, EPD_HEIGHT, EPD_COLOR_BLACK);
     epd_fb_rect(1, 1, EPD_WIDTH - 2, EPD_HEIGHT - 2, EPD_COLOR_BLACK);
-    return epd_display();
 }
 
-esp_err_t test_pattern_probe_b(void)
+esp_err_t test_pattern_probe_a(void)
 {
+    return display_page_arg(draw_probe_a, NULL);
+}
+
+static void draw_probe_b(void *arg)
+{
+    (void)arg;
     epd_fb_fill(EPD_COLOR_WHITE);
 
     label(8, 8, "PROBE B EMPTY WHITE PAGE", EPD_COLOR_BLACK, 2);
@@ -387,7 +457,11 @@ esp_err_t test_pattern_probe_b(void)
 
     epd_fb_rect(0, 0, EPD_WIDTH, EPD_HEIGHT, EPD_COLOR_BLACK);
     epd_fb_rect(1, 1, EPD_WIDTH - 2, EPD_HEIGHT - 2, EPD_COLOR_BLACK);
-    return epd_display();
+}
+
+esp_err_t test_pattern_probe_b(void)
+{
+    return display_page_arg(draw_probe_b, NULL);
 }
 
 /* Alternate the two probe pages so the stale-content question is answered
@@ -408,28 +482,10 @@ void test_probe_sequence(unsigned dwell_ms)
  * we think we are, independently of what the panel shows. */
 void test_dump_fb(void)
 {
-    if (!epd_fb_raw()) {
-        ESP_LOGW(TAG, "no framebuffer to dump");
-        return;
-    }
-    uint32_t sum = 0;
-    for (size_t i = 0; i < EPD_FRAME_BYTES; i++) {
-        sum += epd_fb_read_byte(i);
-    }
-    uint8_t first[16];
-    for (size_t i = 0; i < sizeof(first); ++i) first[i] = epd_fb_read_byte(i);
-    const size_t last = (size_t)(EPD_HEIGHT - 1) * EPD_BYTES_PER_LINE;
-    ESP_LOGI(TAG, "framebuffer checksum=%08" PRIx32 " first16=%02x %02x %02x %02x "
-                  "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
-             sum, first[0], first[1], first[2], first[3], first[4], first[5], first[6], first[7],
-             first[8], first[9], first[10], first[11], first[12], first[13], first[14], first[15]);
-    ESP_LOGI(TAG, "row0[:16]  = %02x %02x %02x %02x %02x %02x %02x %02x",
-             first[0], first[1], first[2], first[3], first[4], first[5], first[6], first[7]);
-    ESP_LOGI(TAG, "row551[:16]= %02x %02x %02x %02x %02x %02x %02x %02x",
-             epd_fb_read_byte(last + 0), epd_fb_read_byte(last + 1),
-             epd_fb_read_byte(last + 2), epd_fb_read_byte(last + 3),
-             epd_fb_read_byte(last + 4), epd_fb_read_byte(last + 5),
-             epd_fb_read_byte(last + 6), epd_fb_read_byte(last + 7));
+    const epd_diag_t *d = epd_diag();
+    ESP_LOGI(TAG, "framebuffer: strip-based (%d rows x %d bytes), no full-frame buffer",
+             (int)EPD_STRIP_ROWS, EPD_BYTES_PER_LINE);
+    ESP_LOGI(TAG, "last frame bytes sent: %llu", (unsigned long long)d->bytes_sent);
 }
 
 void test_report(void)
