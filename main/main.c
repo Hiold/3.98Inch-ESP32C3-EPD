@@ -636,10 +636,9 @@ static void refresh_task(void *arg)
                 sizeof(ui_state.today_plan));
         xSemaphoreTake(s_display_mutex, portMAX_DELAY);
         ui_app_set_state(&ui_state);
-        int result = ui_app_render();
-        if (result == 0) result = epd_display();
+        int result = ui_app_render();   /* 内部已包含条带流式 epd_display */
         xSemaphoreGive(s_display_mutex);
-        if (result != ESP_OK) ESP_LOGE(TAG, "queued EPD refresh failed: %d", result);
+        if (result != 0) ESP_LOGE(TAG, "queued EPD refresh failed: %d", result);
     }
 }
 
