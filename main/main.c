@@ -378,7 +378,6 @@ void app_main(void)
      * panel self-test automatically at boot. */
     epd_set_frame_mode(EPD_FRAME_SWEEP);
     epd_set_rowmap(EPD_MAP_LINEAR);
-    epd_set_bit_order(false);
     epd_set_column_major(false);
     epd_set_init_variant(false);
     epd_set_x_offset(0);
@@ -636,10 +635,9 @@ static void refresh_task(void *arg)
                 sizeof(ui_state.today_plan));
         xSemaphoreTake(s_display_mutex, portMAX_DELAY);
         ui_app_set_state(&ui_state);
-        int result = ui_app_render();
-        if (result == 0) result = epd_display();
+        int result = ui_app_render();   /* 内部已包含条带流式 epd_display */
         xSemaphoreGive(s_display_mutex);
-        if (result != ESP_OK) ESP_LOGE(TAG, "queued EPD refresh failed: %d", result);
+        if (result != 0) ESP_LOGE(TAG, "queued EPD refresh failed: %d", result);
     }
 }
 
@@ -717,20 +715,31 @@ static bool weather_json_number(const char *json, const char *key, double *out)
     char quoted_key[40];
     const int key_len = snprintf(quoted_key, sizeof(quoted_key), "\"%s\"", key);
     if (key_len <= 0 || (size_t)key_len >= sizeof(quoted_key)) return false;
-    const char *cursor = strstr(json, quoted_key);
-    if (!cursor) return false;
-    cursor += key_len;
-    while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' ||
-           *cursor == '\n') ++cursor;
-    if (*cursor++ != ':') return false;
-    while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' ||
-           *cursor == '\n') ++cursor;
-    char *end = NULL;
-    const double value = strtod(cursor, &end);
-    if (end == cursor || value != value || value > 1000000.0 ||
-        value < -1000000.0) return false;
-    *out = value;
-    return true;
+
+    /* open-meteo 在同一响应里对同名键可能出现两次：current_units 里是字符串
+     * （如 "temperature_2m":"°C"），current 里才是数值。strstr 会先命中
+     * 前面的字符串项导致 strtod 失败。因此遇到非数值匹配要继续往后找，
+     * 直到真正的数值项。 */
+    const char *cursor = json;
+    while ((cursor = strstr(cursor, quoted_key)) != NULL) {
+        const char *p = cursor + key_len;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+        if (*p != ':') { cursor += 1; continue; }
+        ++p;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+        char *end = NULL;
+        const double value = strtod(p, &end);
+        if (end != p) { /* 解析出了数值 */
+            if (value != value || value > 1000000.0 || value < -1000000.0) {
+                return false; /* 数值确实非法 */
+            }
+            *out = value;
+            return true;
+        }
+        /* 非数值（如 "°C"），继续找下一处同名键。 */
+        cursor += 1;
+    }
+    return false;
 }
 
 static const char *weather_summary_for_code(int code)

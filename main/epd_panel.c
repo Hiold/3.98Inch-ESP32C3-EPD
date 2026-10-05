@@ -58,36 +58,18 @@ static const char *XFER_NAMES[] = {"chunk(8K)", "line(192B)", "byte(1B)",
 
 static spi_device_handle_t s_spi;
 static bool s_bus_ready;
-/* BLE is initialized before the panel so its controller buffers get a
- * contiguous internal-RAM region.  Keep the logical EPD framebuffer in small
- * independent chunks; the drawing API still presents a normal 2bpp surface,
- * but no single 106 KiB allocation is required. */
-#define EPD_FB_CHUNKS 24u
-#define EPD_FB_CHUNK_BYTES ((EPD_FRAME_BYTES + EPD_FB_CHUNKS - 1u) / EPD_FB_CHUNKS)
-static uint8_t *s_fb_chunks[EPD_FB_CHUNKS];
+/* The framebuffer is now a fixed 16-row strip (16 x 192 = 3072 bytes). Only
+ * the currently active strip is drawn into; primitives clip to it in native
+ * coordinates. No 106 KiB allocation is needed. */
+#define EPD_STRIP_ROWS 16u
+static uint8_t s_strip[EPD_STRIP_ROWS][EPD_BYTES_PER_LINE];
+static int s_strip_y0;             /* current active strip's first row (native y), -1 = none */
+static bool s_strip_active;
 static epd_diag_t s_diag;
 
-static inline uint8_t *fb_byte_ptr(size_t offset)
+static inline uint8_t *strip_row_ptr(int r)
 {
-    const size_t chunk = offset / EPD_FB_CHUNK_BYTES;
-    return (chunk < EPD_FB_CHUNKS && s_fb_chunks[chunk])
-               ? s_fb_chunks[chunk] + (offset % EPD_FB_CHUNK_BYTES)
-               : NULL;
-}
-
-static inline uint8_t *fb_row_ptr(int y)
-{
-    return (y >= 0 && y < EPD_HEIGHT)
-               ? fb_byte_ptr((size_t)y * EPD_BYTES_PER_LINE)
-               : NULL;
-}
-
-static bool fb_ready(void)
-{
-    for (size_t i = 0; i < EPD_FB_CHUNKS; ++i) {
-        if (!s_fb_chunks[i]) return false;
-    }
-    return true;
+    return (r >= 0 && r < (int)EPD_STRIP_ROWS) ? s_strip[r] : NULL;
 }
 
 static epd_xfer_mode_t s_xfer = EPD_XFER_CHUNK;
@@ -122,47 +104,6 @@ static const char *FRAME_NAMES[] = {"sweep", "per-line"};
  * before a full-frame write, they rely on whatever the power-on default is.
  * Setting this false reproduces that exactly. */
 static bool s_use_partial_window = true;
-
-/*
- * SE0398NZ07A0 frame write.
- *
- * The dedicated driver in the reference repository for this exact panel does
- * not stream the frame; it writes one display line at a time and, crucially,
- * maps logical lines onto physical lines:
- *
- *   imageRow <  276 : physical = imageRow * 2            (0, 2, 4 ... 550)
- *   imageRow >= 276 : physical = 551 - 2 * (imageRow-276) (551, 549 ... 1)
- *
- * i.e. the two halves of the picture are interleaved onto the alternating
- * physical gate lines. Every streaming variant tried so far ignored this and
- * left a fixed band of the glass untouched, so it is implemented literally.
- */
-static esp_err_t epd_write_frame_interleaved(void)
-{
-    if (!s_bus_ready || !fb_ready()) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    s_diag.last_stage = EPD_STAGE_DATA;
-
-    for (int y = 0; y < EPD_HEIGHT; y++) {
-        uint16_t physical = (y < EPD_HEIGHT / 2)
-                                ? (uint16_t)(y * 2)
-                                : (uint16_t)(EPD_HEIGHT - 1 - 2 * (y - EPD_HEIGHT / 2));
-        esp_err_t err = epd_write_line(physical,
-                                       fb_row_ptr(y));
-        if (err != ESP_OK) {
-            stage_fail(EPD_STAGE_DATA, err, "interleaved line write");
-            return err;
-        }
-    }
-    s_diag.frame_count++;
-    s_diag.bytes_sent += EPD_FRAME_BYTES;
-    s_diag.last_stage = EPD_STAGE_IDLE;
-    s_diag.last_err = ESP_OK;
-    ESP_LOGI(TAG, "interleaved frame sent: %d lines, 192 bytes each",
-             EPD_HEIGHT);
-    return ESP_OK;
-}
 
 void epd_set_partial_window_mode(bool enabled)
 {
@@ -200,24 +141,10 @@ const char *epd_frame_mode_name(epd_frame_mode_t mode)
 }
 
 /*
- * Transmission layout.
- *
- * Two candidate layouts exist for this panel:
- *
- *   row-major (what the working EPD_3in98g / jd79665 drivers stream):
- *     the framebuffer is sent as-is, 192 bytes per display line
- *
- *   column-major (what the EPD_3in98g-TU sketch builds, 552 blocks of 192):
- *     byte_index = x * 192 + y / 4, bit_offset = (3 - (y % 4)) * 2
- *
- * Bench result: row-major renders the picture correctly (only a narrow band
- * stays frozen), column-major scrambles it into zebra noise. So row-major is
- * the right layout and this switch exists only to keep that comparison
- * repeatable.
+ * Experiment switches retained for the live-console bring-up comparison. The
+ * frame is now always streamed as 16-row strips, but the setters below remain
+ * public API consumed by the diagnostic console.
  */
-#define WIRE_BYTES ((size_t)EPD_HEIGHT * (EPD_WIDTH / 4))
-
-static uint8_t *s_wire;
 static bool s_column_major = false;
 static bool s_interleaved = false;
 
@@ -239,30 +166,6 @@ void epd_set_column_major(bool enabled)
 }
 
 bool epd_column_major(void) { return s_column_major; }
-
-static void build_wire_buffer(void)
-{
-    if (!s_column_major) {
-        for (size_t i = 0; i < EPD_FRAME_BYTES; ++i) {
-            s_wire[i] = *fb_byte_ptr(i);
-        }
-        return;
-    }
-    uint8_t *w = s_wire;
-    for (int x = 0; x < EPD_HEIGHT; x++) {
-        for (int g = 0; g < EPD_WIDTH / 4; g++) {
-            uint8_t b = 0;
-            for (int k = 0; k < 4; k++) {
-                int px = g * 4 + k; /* position along the 768 axis */
-                size_t idx = (size_t)px * EPD_BYTES_PER_LINE + (size_t)(x >> 2);
-                int shift = 6 - 2 * (x & 3);
-                uint8_t c = (uint8_t)((*fb_byte_ptr(idx) >> shift) & 0x03u);
-                b = (uint8_t)((b << 2) | c);
-            }
-            *w++ = b;
-        }
-    }
-}
 
 /* Physical gate order from SE0398NZ07A0.cpp: logical rows 0..275 map to
  * even physical rows, then logical rows 276..551 map to odd rows in reverse. */
@@ -308,33 +211,6 @@ void epd_set_psr_normal(bool normal)
 
 /* JD79665 requires the controller-sized 800x600 frame on every DTM write. */
 static bool s_physical_frame = true;
-
-/*
- * The datasheet's DTM bit table lists the four pixels of a byte as
- * "Pixel1 Pixel2 Pixel3 Pixel4" in bits 7:6, 5:4, 3:2, 1:0, which is the
- * packing used everywhere in the reference driver and here. Some four-colour
- * panels instead pack the pixels in the opposite order inside the byte, which
- * changes nothing about the byte count but everything about the picture.
- */
-static bool s_reverse_bits = false;
-
-void epd_set_bit_order(bool reversed)
-{
-    s_reverse_bits = reversed;
-    ESP_LOGW(TAG, "byte bit order: %s", reversed ? "reversed" : "normal");
-}
-
-bool epd_bit_order_reversed(void) { return s_reverse_bits; }
-
-/* Map a source byte to the transmitted byte. */
-static inline uint8_t wire_byte(uint8_t b)
-{
-    if (!s_reverse_bits) {
-        return b;
-    }
-    return (uint8_t)(((b & 0x03u) << 6) | ((b & 0x0Cu) << 2) |
-                     ((b & 0x30u) >> 2) | ((b & 0xC0u) >> 6));
-}
 
 void epd_set_physical_frame(bool enabled)
 {
@@ -400,19 +276,10 @@ esp_err_t epd_data_stop(bool *data_flag)
 }
 
 /* One padded physical row, produced on demand so no 120 KB buffer is needed. */
-static void phys_line(int py, uint8_t *out)
+static void strip_phys_line(int r, uint8_t *out)
 {
     memset(out, 0x55, EPD_PHYS_BYTES_PER_LINE); /* white */
-
-    int ly = py - EPD_PHYS_Y_OFFSET;
-    if (ly < 0 || ly >= EPD_HEIGHT) {
-        return;
-    }
-    const uint8_t *src = fb_row_ptr(ly);
-
-    /* 32 px offset = 8 whole bytes, so the body is a straight copy. */
-    int off_bytes = EPD_PHYS_X_OFFSET / 4;
-    memcpy(out + off_bytes, src, EPD_BYTES_PER_LINE);
+    memcpy(out + EPD_PHYS_X_OFFSET / 4, s_strip[r], EPD_BYTES_PER_LINE);
 }
 
 uint32_t epd_clock_hz(void) { return s_clock_hz; }
@@ -430,21 +297,6 @@ void epd_set_x_offset(int offset)
 }
 
 int epd_x_offset(void) { return s_x_offset; }
-
-/* A row of the frame, shifted along x by s_x_offset pixels. Rows are stored in
- * units of 4 px, so a shift rotates whole bytes. */
-static void frame_line(int y, uint8_t *out)
-{
-    const uint8_t *src = fb_row_ptr(y);
-    if (s_x_offset == 0) {
-        memcpy(out, src, EPD_BYTES_PER_LINE);
-        return;
-    }
-    int shift_bytes = (s_x_offset / 4) % EPD_BYTES_PER_LINE;
-    for (int i = 0; i < EPD_BYTES_PER_LINE; i++) {
-        out[i] = src[(i + shift_bytes) % EPD_BYTES_PER_LINE];
-    }
-}
 
 void epd_set_clock_hz(uint32_t hz)
 {
@@ -550,25 +402,6 @@ static esp_err_t write_data_block(const uint8_t *data, size_t len)
         return write_data_block_continuous(data, len);
     }
 
-    if (s_reverse_bits) {
-        /* Transform through a scratch buffer: the source may be the caller's
-         * framebuffer, which must not be modified. */
-        static uint8_t scratch[2048];
-        while (len > 0) {
-            size_t n = len > sizeof(scratch) ? sizeof(scratch) : len;
-            for (size_t i = 0; i < n; i++) {
-                scratch[i] = wire_byte(data[i]);
-            }
-            esp_err_t err = spi_tx(scratch, n);
-            if (err != ESP_OK) {
-                return err;
-            }
-            data += n;
-            len -= n;
-        }
-        return ESP_OK;
-    }
-
     switch (s_xfer) {
     case EPD_XFER_BYTE:
         for (size_t i = 0; i < len; i++) {
@@ -616,19 +449,9 @@ static esp_err_t write_data_block_continuous(const uint8_t *data, size_t len)
         return err;
     }
 
-    static uint8_t scratch[2048];
     while (len > 0) {
         size_t n = len > EPD_DATA_CHUNK ? EPD_DATA_CHUNK : len;
         const uint8_t *tx = data;
-        if (s_reverse_bits) {
-            if (n > sizeof(scratch)) {
-                n = sizeof(scratch);
-            }
-            for (size_t i = 0; i < n; i++) {
-                scratch[i] = wire_byte(data[i]);
-            }
-            tx = scratch;
-        }
         spi_transaction_t t = {
             .length = n * 8,
             .tx_buffer = tx,
@@ -897,72 +720,56 @@ esp_err_t epd_init(void)
 
 esp_err_t epd_fb_alloc(void)
 {
-    if (fb_ready()) {
-        return ESP_OK;
-    }
-    for (size_t i = 0; i < EPD_FB_CHUNKS; ++i) {
-        if (!s_fb_chunks[i]) {
-            s_fb_chunks[i] = heap_caps_malloc(EPD_FB_CHUNK_BYTES,
-                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-            if (!s_fb_chunks[i]) s_fb_chunks[i] = malloc(EPD_FB_CHUNK_BYTES);
-            if (!s_fb_chunks[i]) {
-                ESP_LOGE(TAG, "cannot allocate framebuffer chunk %u/%u (%u bytes)",
-                         (unsigned)i, (unsigned)EPD_FB_CHUNKS,
-                         (unsigned)EPD_FB_CHUNK_BYTES);
-                for (size_t j = 0; j < EPD_FB_CHUNKS; ++j) {
-                    free(s_fb_chunks[j]);
-                    s_fb_chunks[j] = NULL;
-                }
-                return ESP_ERR_NO_MEM;
-            }
-            memset(s_fb_chunks[i], 0, EPD_FB_CHUNK_BYTES);
-        }
-    }
-    ESP_LOGI(TAG, "framebuffer %d bytes in %u chunks of %u bytes",
-             EPD_FRAME_BYTES, (unsigned)EPD_FB_CHUNKS,
-             (unsigned)EPD_FB_CHUNK_BYTES);
+    /* 条带缓冲为静态数组，无需运行时分配。 */
+    s_strip_active = false;
     return ESP_OK;
 }
 
-uint8_t *epd_fb_raw(void) { return fb_ready() ? s_fb_chunks[0] : NULL; }
-
-esp_err_t epd_fb_copy_from(const uint8_t *src, size_t length)
+void epd_strip_begin(int y0)
 {
-    if (!src || !fb_ready() || length > EPD_FRAME_BYTES) {
-        return ESP_ERR_INVALID_ARG;
+    if (y0 < 0) y0 = 0;
+    if (y0 >= EPD_HEIGHT) y0 = EPD_HEIGHT - (int)EPD_STRIP_ROWS;
+    s_strip_y0 = y0;
+    s_strip_active = true;
+    /* 白 = 0x55（4 像素均为白 01）。 */
+    const uint8_t white = 0x55u;
+    for (size_t i = 0; i < EPD_STRIP_ROWS; ++i) {
+        memset(s_strip[i], white, EPD_BYTES_PER_LINE);
     }
-    for (size_t i = 0; i < length; ++i) *fb_byte_ptr(i) = src[i];
-    if (length < EPD_FRAME_BYTES) {
-        for (size_t i = length; i < EPD_FRAME_BYTES; ++i) *fb_byte_ptr(i) = 0;
-    }
-    return ESP_OK;
 }
 
-uint8_t epd_fb_read_byte(size_t offset)
+bool epd_strip_active(void) { return s_strip_active; }
+
+void epd_strip_copy(const uint8_t *src, size_t src_stride, int rows)
 {
-    return (offset < EPD_FRAME_BYTES && fb_ready()) ? *fb_byte_ptr(offset) : 0;
+    if (!src || !s_strip_active) return;
+    if (rows > (int)EPD_STRIP_ROWS) rows = (int)EPD_STRIP_ROWS;
+    for (int r = 0; r < rows; ++r) {
+        memcpy(s_strip[r], src + (size_t)r * src_stride, EPD_BYTES_PER_LINE);
+    }
 }
 
 void epd_fb_fill(uint8_t color)
 {
-    if (!fb_ready()) {
-        return;
-    }
-    /* One byte holds four identical pixels. */
+    if (!s_strip_active) return;
     uint8_t packed = (uint8_t)((color << 6) | (color << 4) | (color << 2) | color);
-    for (size_t i = 0; i < EPD_FB_CHUNKS; ++i) {
-        memset(s_fb_chunks[i], packed, EPD_FB_CHUNK_BYTES);
+    for (size_t i = 0; i < EPD_STRIP_ROWS; ++i) {
+        memset(s_strip[i], packed, EPD_BYTES_PER_LINE);
     }
 }
 
 void epd_fb_set_pixel(int x, int y, uint8_t color)
 {
-    if (!fb_ready() || x < 0 || y < 0 || x >= EPD_WIDTH || y >= EPD_HEIGHT) {
+    if (!s_strip_active || x < 0 || y < 0 || x >= EPD_WIDTH) {
         return;
     }
-    size_t idx = (size_t)y * EPD_BYTES_PER_LINE + (size_t)(x >> 2);
-    int shift = 6 - 2 * (x & 3); /* leftmost pixel in bits 7:6 */
-    uint8_t *byte = fb_byte_ptr(idx);
+    const int r = y - s_strip_y0;
+    if (r < 0 || r >= (int)EPD_STRIP_ROWS) {
+        return; /* 不在当前条带，丢弃 */
+    }
+    size_t idx = (size_t)(x >> 2);
+    int shift = 6 - 2 * (x & 3);
+    uint8_t *byte = &s_strip[r][idx];
     *byte = (uint8_t)((*byte & ~(0x03u << shift)) | ((color & 0x03u) << shift));
 }
 
@@ -1116,113 +923,69 @@ static esp_err_t epd_set_full_window(void)
 }
 
 /*
- * Transmit an 800x600 frame with the 768x552 image at the JD79665 offset. Rows are built one
- * at a time, so this needs no extra framebuffer.
+ * Transmit the controller-sized 800x600 frame as 16-row strips. The render
+ * callback fills the active strip in native coordinates before each group of
+ * physical rows is streamed. Reuses the proven "one bus acquisition + row-
+ * continuous SPI" mechanism from the old full-frame writer.
  */
-static esp_err_t epd_write_physical_frame(void)
+typedef esp_err_t (*epd_strip_render_fn)(void *ctx, int y0);
+
+esp_err_t epd_write_strips(epd_strip_render_fn render, void *ctx)
 {
-    if (!s_bus_ready || !fb_ready()) {
-        return ESP_ERR_INVALID_STATE;
-    }
+    if (!s_bus_ready) return ESP_ERR_INVALID_STATE;
     s_diag.last_stage = EPD_STAGE_DATA;
 
     esp_err_t err = epd_set_full_window();
-    if (err != ESP_OK) {
-        stage_fail(EPD_STAGE_DATA, err, "set physical window");
-        return err;
-    }
+    if (err != ESP_OK) { stage_fail(EPD_STAGE_DATA, err, "set full window"); return err; }
     err = write_cmd(CMD_DTM);
-    if (err != ESP_OK) {
-        stage_fail(EPD_STAGE_DATA, err, "DTM");
-        return err;
-    }
+    if (err != ESP_OK) { stage_fail(EPD_STAGE_DATA, err, "DTM"); return err; }
 
-    /* Build each row just before transmission. Continuous mode keeps CS low
-     * across the bounded SPI transactions that make up the 120000-byte DTM. */
     static uint8_t line[EPD_PHYS_BYTES_PER_LINE];
     err = spi_device_acquire_bus(s_spi, portMAX_DELAY);
-    if (err != ESP_OK) {
-        stage_fail(EPD_STAGE_DATA, err, "acquire physical frame bus");
-        return err;
-    }
+    if (err != ESP_OK) { stage_fail(EPD_STAGE_DATA, err, "acquire strip bus"); return err; }
     gpio_set_level(PIN_EPD_DC, 1);
-    for (int py = 0; py < EPD_PHYS_HEIGHT && err == ESP_OK; py++) {
-        phys_line(py, line);
-        if (s_reverse_bits) {
-            for (size_t i = 0; i < EPD_PHYS_BYTES_PER_LINE; i++) {
-                line[i] = wire_byte(line[i]);
-            }
+
+    int py = 0;
+    for (int y0 = 0; y0 < EPD_HEIGHT; y0 += (int)EPD_STRIP_ROWS) {
+        epd_strip_begin(y0);
+        if (render) {
+            err = render(ctx, y0);
+            if (err != ESP_OK) break;
         }
+        for (int r = 0; r < (int)EPD_STRIP_ROWS; ++r) {
+            strip_phys_line(r, line);
+            spi_transaction_t t = {
+                .length = EPD_PHYS_BYTES_PER_LINE * 8,
+                .tx_buffer = line,
+                .flags = (py + 1 < EPD_PHYS_HEIGHT) ? SPI_TRANS_CS_KEEP_ACTIVE : 0,
+            };
+            err = spi_device_polling_transmit(s_spi, &t);
+            if (err != ESP_OK) break;
+            ++py;
+            if (py >= EPD_PHYS_HEIGHT) break;
+        }
+        if (err != ESP_OK) break;
+    }
+    /* 补足图像区之后的物理行（552..599）为白色，凑满 600 行控制器帧。 */
+    while (err == ESP_OK && py < EPD_PHYS_HEIGHT) {
+        memset(line, 0x55, EPD_PHYS_BYTES_PER_LINE);
         spi_transaction_t t = {
             .length = EPD_PHYS_BYTES_PER_LINE * 8,
             .tx_buffer = line,
             .flags = (py + 1 < EPD_PHYS_HEIGHT) ? SPI_TRANS_CS_KEEP_ACTIVE : 0,
         };
         err = spi_device_polling_transmit(s_spi, &t);
+        ++py;
     }
     spi_device_release_bus(s_spi);
-    if (err != ESP_OK) {
-        stage_fail(EPD_STAGE_DATA, err, "physical frame payload");
-        return err;
-    }
+    if (err != ESP_OK) { stage_fail(EPD_STAGE_DATA, err, "strip payload"); return err; }
 
     s_diag.frame_count++;
     s_diag.bytes_sent += EPD_PHYS_FRAME_BYTES;
     s_diag.last_stage = EPD_STAGE_IDLE;
     s_diag.last_err = ESP_OK;
-    ESP_LOGI(TAG, "physical frame sent: %dx%d, %d bytes, image at (%d,%d)",
-             EPD_PHYS_WIDTH, EPD_PHYS_HEIGHT, EPD_PHYS_FRAME_BYTES,
-             EPD_PHYS_X_OFFSET, EPD_PHYS_Y_OFFSET);
-    return ESP_OK;
-}
-
-esp_err_t epd_write_frame(const uint8_t *frame)
-{
-    if (!s_bus_ready) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (s_physical_frame) {
-        return epd_write_physical_frame();
-    }
-    if (!s_wire) {
-        s_wire = heap_caps_malloc(WIRE_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!s_wire) s_wire = malloc(WIRE_BYTES);
-        if (!s_wire) return ESP_ERR_NO_MEM;
-    }
-    s_diag.last_stage = EPD_STAGE_DATA;
-    build_wire_buffer();
-
-    /* The reference drivers always program the window before writing a frame
-     * (jd79665.cpp does it per line); SE0398NZ07A0 relies on the default. */
-    if (s_use_partial_window) {
-        esp_err_t err = epd_set_full_window();
-        if (err != ESP_OK) {
-            stage_fail(EPD_STAGE_DATA, err, "set partial window");
-            return err;
-        }
-    }
-
-    esp_err_t err = write_cmd(CMD_DTM);
-    if (err != ESP_OK) {
-        stage_fail(EPD_STAGE_DATA, err, "DTM command");
-        return err;
-    }
-
-    /* The whole frame goes out in one DTM run; write_data_block chooses the
-     * SPI framing (8 KiB chunks, per line, or per byte). That framing is the
-     * variable under test in this experiment. */
-    err = write_data_block(s_wire, WIRE_BYTES);
-    if (err != ESP_OK) {
-        stage_fail(EPD_STAGE_DATA, err, "frame payload");
-        return err;
-    }
-    s_diag.frame_count++;
-    s_diag.bytes_sent += WIRE_BYTES;
-    s_diag.last_stage = EPD_STAGE_IDLE;
-    s_diag.last_err = ESP_OK;
-    ESP_LOGI(TAG, "frame streamed (%s, window %s): %u bytes",
-             epd_xfer_mode_name(s_xfer),
-             s_use_partial_window ? "on" : "off", (unsigned)WIRE_BYTES);
+    ESP_LOGI(TAG, "strip frame sent: %d rows, %u bytes total",
+             EPD_PHYS_HEIGHT, (unsigned)EPD_PHYS_FRAME_BYTES);
     return ESP_OK;
 }
 
@@ -1340,22 +1103,11 @@ esp_err_t epd_sleep(void)
     return write_data(0xA5);
 }
 
-esp_err_t epd_display(void)
+esp_err_t epd_display(epd_strip_render_fn render, void *ctx)
 {
-    if (!fb_ready()) {
-        return ESP_ERR_INVALID_STATE;
-    }
     esp_err_t err = epd_power_on();
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    /* Stream the whole frame; the transmission framing under test lives in
-     * write_data_block, so there is deliberately only one path here. */
-    err = epd_write_frame(NULL);
-    if (err != ESP_OK) {
-        return err;
-    }
-
+    if (err != ESP_OK) return err;
+    err = epd_write_strips(render, ctx);
+    if (err != ESP_OK) return err;
     return epd_refresh(true);
 }
