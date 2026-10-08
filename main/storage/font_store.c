@@ -13,6 +13,7 @@
 static const uint32_t *s_table = NULL;
 static const uint8_t *s_glyphs = NULL;
 static uint32_t s_count = 0;
+static esp_partition_mmap_handle_t s_map_handle = 0;
 
 static int index_lookup(uint32_t codepoint, const uint32_t *table, uint32_t n)
 {
@@ -45,13 +46,17 @@ esp_err_t font_store_init(void)
 {
     const esp_partition_t *part = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0x41, "fonts");
-    if (!part || part->size < FONT_STORE_HEADER_SIZE) {
+    if (!part) {
         ESP_LOGW("font_store", "fonts partition not found");
         return ESP_ERR_NOT_FOUND;
     }
+    if (part->size < FONT_STORE_HEADER_SIZE) {
+        ESP_LOGW("font_store", "fonts partition too small");
+        return ESP_ERR_INVALID_SIZE;
+    }
     const void *map = NULL;
     esp_err_t err = esp_partition_mmap(part, 0, part->size,
-                                       ESP_PARTITION_MMAP_DATA, &map, NULL);
+                                       ESP_PARTITION_MMAP_DATA, &map, &s_map_handle);
     if (err != ESP_OK) {
         ESP_LOGW("font_store", "mmap failed: %d", err);
         return err;
@@ -59,7 +64,7 @@ esp_err_t font_store_init(void)
     const uint8_t *p = (const uint8_t *)map;
     if (p[0] != 'E' || p[1] != 'P' || p[2] != 'F' || p[3] != '1') {
         ESP_LOGW("font_store", "bad font magic");
-        return ESP_ERR_INVALID_MAGIC;
+        return ESP_ERR_INVALID_ARG;
     }
     s_count = ((const uint32_t *)p)[1];
     if (s_count == 0 || s_count > part->size / (FONT_STORE_CODEPOINT_SIZE + FONT_STORE_GLYPH_BYTES)) {
