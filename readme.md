@@ -70,9 +70,11 @@ today_plan 等任意文本依赖 flash 内置字库，覆盖 `charactor_list.txt
     python -m pip install fonttools pillow
     python gen_font.py
 
-生成 `tools/font/fonts.bin` 后，烧录到 `fonts` 分区（0x270000）：
+生成 `tools/font/fonts.bin` 后，`idf.py flash`（含 VS Code ESP-IDF 插件烧录）会自动把它烧到 `fonts` 分区（`0x270000`）——项目根 `CMakeLists.txt` 已通过 `esptool_py_flash_to_partition` 注册。因此直接正常烧录即可：
 
-    idf.py write-flash 0x270000 tools/font/fonts.bin
+    idf.py flash
+
+若 `tools/font/fonts.bin` 不存在（例如新克隆仓库），烧录会自动跳过 `fonts` 分区；请先运行上面的 `gen_font.py` 生成后再烧录。
 
 未烧录字库时设备仍可正常启动，缺失字形以空白显示。
 
