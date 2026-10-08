@@ -858,7 +858,7 @@ static void weather_task(void *arg)
 static bool start_weather_task(void)
 {
     if (s_weather_task_handle) return true;
-    const BaseType_t result = xTaskCreate(weather_task, "weather", 4096,
+    const BaseType_t result = xTaskCreate(weather_task, "weather", 12288,
                                           NULL, 3, &s_weather_task_handle);
     if (result != pdPASS) {
         s_weather_task_handle = NULL;
