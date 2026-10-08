@@ -68,14 +68,14 @@ esp_err_t font_store_init(void)
     const uint8_t *p = (const uint8_t *)map;
     if (memcmp(p, FONT_STORE_MAGIC, 4) != 0) {
         ESP_LOGW("font_store", "bad font magic");
-        esp_partition_mmap_unmap(s_map_handle);
+        esp_partition_munmap(s_map_handle);
         s_map_handle = 0;
         return ESP_ERR_INVALID_ARG;
     }
     s_count = ((const uint32_t *)p)[1];
     if (s_count == 0 || s_count > part->size / (FONT_STORE_CODEPOINT_SIZE + FONT_STORE_GLYPH_BYTES)) {
         ESP_LOGW("font_store", "invalid glyph count %lu", (unsigned long)s_count);
-        esp_partition_mmap_unmap(s_map_handle);
+        esp_partition_munmap(s_map_handle);
         s_map_handle = 0;
         return ESP_ERR_INVALID_SIZE;
     }
