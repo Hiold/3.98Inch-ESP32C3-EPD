@@ -50,6 +50,7 @@
 #include "refresh_queue.h"
 #include "nvs_store.h"
 #include "photo_store.h"
+#include "font_store.h"
 #include "ntp_manager.h"
 #include "ui_app.h"
 #include "wifi_manager.h"
@@ -277,6 +278,10 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "photo store unavailable: %s", esp_err_to_name(err));
     }
+
+    /* Flash font is optional: a missing/corrupt library only degrades missing
+     * glyphs to blanks and never blocks boot. */
+    font_store_init();
 
     /* Load persistent configuration before starting the diagnostic console. */
     app_state_init(&s_app_state, 0);
