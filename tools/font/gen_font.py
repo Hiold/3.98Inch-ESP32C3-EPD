@@ -41,9 +41,9 @@ def _rasterize_one(ttc_path, codepoint, size=32, oversample=4):
     big = size * oversample
     font = ImageFont.truetype(ttc_path, size=big, index=0)
     ch = chr(codepoint)
-    img = Image.new("1", (big, big), 1)
+    img = Image.new("1", (big, big), 0)          # 背景=0(空白)
     draw = ImageDraw.Draw(img)
-    draw.text((0, 0), ch, font=font, fill=0)
+    draw.text((0, 0), ch, font=font, fill=1)     # 文字=1(墨迹)
     bbox = img.getbbox()
     if bbox is None:
         return bytes(size * (size // 8))
@@ -53,9 +53,9 @@ def _rasterize_one(ttc_path, codepoint, size=32, oversample=4):
     scale = min(size / cw, size / ch_h)
     nw, nh = max(1, int(cw * scale)), max(1, int(ch_h * scale))
     crop = crop.resize((nw, nh), Image.NEAREST)
-    out = Image.new("1", (size, size), 1)
+    out = Image.new("1", (size, size), 0)        # 背景=0
     out.paste(crop, ((size - nw) // 2, (size - nh) // 2))
-    return out.tobytes("raw", "1;R")  # 32 rows * 4 bytes, top-to-bottom rows
+    return out.tobytes("raw", "1")               # MSB-first, 每行4字节, 行序从上到下
 
 
 def generate(ttc_path, char_list_path, out_bin):
