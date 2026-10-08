@@ -1,6 +1,6 @@
 """Generate fonts.bin from msyh.ttc + charactor_list.txt.
 
-Requires: pip install fonttools pillow
+Requires: pip install pillow
 Usage:
     python gen_font.py [ttc_path] [char_list] [out_bin]
 Defaults:
@@ -55,7 +55,7 @@ def _rasterize_one(ttc_path, codepoint, size=32, oversample=4):
     crop = crop.resize((nw, nh), Image.NEAREST)
     out = Image.new("1", (size, size), 1)
     out.paste(crop, ((size - nw) // 2, (size - nh) // 2))
-    return out.tobytes("raw", "1;R", 0, -1)  # 32 rows * 4 bytes
+    return out.tobytes("raw", "1;R")  # 32 rows * 4 bytes, top-to-bottom rows
 
 
 def generate(ttc_path, char_list_path, out_bin):
