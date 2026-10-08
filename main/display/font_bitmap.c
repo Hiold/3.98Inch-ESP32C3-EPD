@@ -1345,7 +1345,7 @@ const uint8_t *manual_font_cjk_rows(uint32_t codepoint)
     if (font_store_lookup(codepoint, &rows)) {
         return rows;
     }
-    return NULL;
+    return BLANK_CJK;
 }
 
 const uint8_t *manual_font_date_digit_rows(uint8_t digit)
