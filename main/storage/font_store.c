@@ -1,6 +1,7 @@
 #include "font_store.h"
 
 #include <stdint.h>
+#include <string.h>
 
 #ifdef ESP_PLATFORM
 #include "esp_log.h"
@@ -13,7 +14,10 @@
 static const uint32_t *s_table = NULL;
 static const uint8_t *s_glyphs = NULL;
 static uint32_t s_count = 0;
+
+#ifdef ESP_PLATFORM
 static esp_partition_mmap_handle_t s_map_handle = 0;
+#endif
 
 static int index_lookup(uint32_t codepoint, const uint32_t *table, uint32_t n)
 {
@@ -62,13 +66,17 @@ esp_err_t font_store_init(void)
         return err;
     }
     const uint8_t *p = (const uint8_t *)map;
-    if (p[0] != 'E' || p[1] != 'P' || p[2] != 'F' || p[3] != '1') {
+    if (memcmp(p, FONT_STORE_MAGIC, 4) != 0) {
         ESP_LOGW("font_store", "bad font magic");
+        esp_partition_mmap_unmap(s_map_handle);
+        s_map_handle = 0;
         return ESP_ERR_INVALID_ARG;
     }
     s_count = ((const uint32_t *)p)[1];
     if (s_count == 0 || s_count > part->size / (FONT_STORE_CODEPOINT_SIZE + FONT_STORE_GLYPH_BYTES)) {
         ESP_LOGW("font_store", "invalid glyph count %lu", (unsigned long)s_count);
+        esp_partition_mmap_unmap(s_map_handle);
+        s_map_handle = 0;
         return ESP_ERR_INVALID_SIZE;
     }
     s_table = (const uint32_t *)(p + FONT_STORE_HEADER_SIZE);
