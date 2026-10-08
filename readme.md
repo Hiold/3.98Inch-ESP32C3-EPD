@@ -52,8 +52,8 @@ main/
 ├── ui/                 日历 / 相框 / 状态页渲染
 └── test_patterns.c     串口触发的面板自检图样
 docs/                   BLE 协议规范与交接说明（中文）+ 实物照片
-tools/                  照片量化、面板测量与校准脚本
-partitions.csv          nvs / phy_init / factory / photos(0x260000)
+tools/                  照片量化、面板测量与校准脚本；字体子集生成（tools/font）
+partitions.csv          nvs / phy_init / factory / photos / fonts + 备用
 ```
 
 ## 构建与烧录
@@ -61,6 +61,20 @@ partitions.csv          nvs / phy_init / factory / photos(0x260000)
 需要 ESP-IDF **6.0 或更高版本**（`main/idf_component.yml` 依赖 `h2zero/esp-nimble-cpp`，首次构建会自动下载）。
 
 `sdkconfig.defaults` 已固定目标芯片、4 MB Flash、自定义分区表和 NimBLE 单连接外设配置，直接构建即可。
+
+## 字库
+
+today_plan 等任意文本依赖 flash 内置字库，覆盖 `charactor_list.txt` 的 2500 汉字及常用标点、数字、字母。首先生成字库（需 `fonttools` 与 `pillow`）：
+
+    cd tools/font
+    python -m pip install fonttools pillow
+    python gen_font.py
+
+生成 `tools/font/fonts.bin` 后，烧录到 `fonts` 分区（0x270000）：
+
+    idf.py write-flash 0x270000 tools/font/fonts.bin
+
+未烧录字库时设备仍可正常启动，缺失字形以空白显示。
 
 ## BLE 接口
 
